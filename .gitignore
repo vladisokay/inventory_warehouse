@@ -1,0 +1,5 @@
+/client/build/
+/client/dist/
+/client/main.spec
+/migrations/
+/.venv/
