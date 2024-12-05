@@ -63,7 +63,7 @@
     ```sql
      createdb inventory_db
    ```
-   Настройте подключение в файле config.py:
+   Настройте подключение в файле back/app.py:
     
     ```python
         DATABASE_URI = 'postgresql://username:password@localhost/inventory_db'
