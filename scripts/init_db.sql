@@ -1,11 +1,6 @@
--- ===========================================
--- Файл инициализации базы данных: init_db.sql
--- ===========================================
-
--- Прекращаем выполнение скрипта при возникновении ошибки
 BEGIN;
 
--- 1. Создание Таблиц
+-- 1. Создание таблиц
 
 -- Создание таблицы ролей
 CREATE TABLE IF NOT EXISTS roles (
@@ -23,7 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     FOREIGN KEY (role_id) REFERENCES roles(role_id) ON DELETE RESTRICT
 );
 
--- Создание таблицы категорий продуктов
+-- Создание таблицы категорий товаров
 CREATE TABLE IF NOT EXISTS product_categories (
     category_id SERIAL PRIMARY KEY,
     category_name VARCHAR(100) UNIQUE NOT NULL,
@@ -38,7 +33,7 @@ CREATE TABLE IF NOT EXISTS suppliers (
     address VARCHAR(255)
 );
 
--- Создание таблицы продуктов
+-- Создание таблицы товаров
 CREATE TABLE IF NOT EXISTS products (
     product_id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
@@ -48,7 +43,7 @@ CREATE TABLE IF NOT EXISTS products (
     FOREIGN KEY (category_id) REFERENCES product_categories(category_id) ON DELETE RESTRICT
 );
 
--- Создание таблицы инвентаря
+-- Создание таблицы для отображения информации по складу в клиентском приложении
 CREATE TABLE IF NOT EXISTS inventory (
     product_id INTEGER PRIMARY KEY,
     quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
@@ -77,14 +72,10 @@ INSERT INTO roles (role_name, permissions) VALUES
 ('Работник', '{"can_add_product": true, "can_delete_product": false, "can_update_quantity": true, "can_manage_categories": false, "can_manage_suppliers": false}')
 ON CONFLICT (role_name) DO NOTHING;
 
--- 3. Создание Представлений (Views)
+-- 3. Представления
 
--- Удаление представлений, если они уже существуют
-DROP VIEW IF EXISTS view_product_inventory CASCADE;
-DROP VIEW IF EXISTS view_transaction_details CASCADE;
-DROP VIEW IF EXISTS view_user_permissions CASCADE;
 
--- Создание представления для склада товаров
+-- Представление для склада товаров
 CREATE VIEW view_product_inventory AS
 SELECT
     p.product_id,
@@ -108,7 +99,7 @@ LEFT JOIN
 LEFT JOIN
     suppliers s ON t.supplier_id = s.supplier_id;
 
--- Создание представления для деталей транзакций
+-- Представление для деталей транзакций
 CREATE VIEW view_transaction_details AS
 SELECT
     t.transaction_id,
@@ -126,7 +117,7 @@ JOIN
 LEFT JOIN
     suppliers s ON t.supplier_id = s.supplier_id;
 
--- Создание представления для разрешений пользователей
+-- Представление для разрешений пользователей
 CREATE VIEW view_user_permissions AS
 SELECT
     u.user_id,
@@ -138,17 +129,9 @@ FROM
 JOIN
     roles r ON u.role_id = r.role_id;
 
--- ===========================================
 -- 4. Создание Функций
--- ===========================================
 
--- Удаление функций, если они уже существуют
-DROP FUNCTION IF EXISTS update_inventory_on_transaction() CASCADE;
-DROP FUNCTION IF EXISTS check_inventory_before_withdrawal() CASCADE;
-DROP FUNCTION IF EXISTS get_user_permissions(INTEGER) CASCADE;
-DROP FUNCTION IF EXISTS calculate_total_inventory_value() CASCADE;
-
--- Создание функции триггера для обновления склада при транзакции
+-- Функция триггер для обновления склада при транзакции
 CREATE OR REPLACE FUNCTION update_inventory_on_transaction()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -171,7 +154,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Создание функции триггера для проверки достаточного количества при расходе
+-- Функция триггер для проверки достаточного количества при расходе
 CREATE OR REPLACE FUNCTION check_inventory_before_withdrawal()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -188,7 +171,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Создание функции для получения разрешений пользователя
+-- Функция для получения прав пользователя
 CREATE OR REPLACE FUNCTION get_user_permissions(p_user_id INTEGER)
 RETURNS TABLE (
     role_name VARCHAR,
@@ -208,7 +191,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Создание функции для расчета общей стоимости склада
+-- Функция для расчета общей стоимости товара на складе
 CREATE OR REPLACE FUNCTION calculate_total_inventory_value()
 RETURNS NUMERIC AS $$
 DECLARE
@@ -223,18 +206,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- 5. Создание Хранимых Процедур
+-- 5. Процедуры
 
--- Удаление хранимых процедур, если они уже существуют
-DROP PROCEDURE IF EXISTS add_new_product(VARCHAR, TEXT, NUMERIC, INTEGER, INTEGER, INTEGER) CASCADE;
-DROP PROCEDURE IF EXISTS record_transaction(INTEGER, VARCHAR, INTEGER, INTEGER) CASCADE;
-DROP PROCEDURE IF EXISTS delete_product(INTEGER) CASCADE;
-DROP PROCEDURE IF EXISTS delete_category(INTEGER) CASCADE;
-DROP PROCEDURE IF EXISTS add_category_proc(VARCHAR, TEXT) CASCADE;
-DROP PROCEDURE IF EXISTS add_supplier_proc(VARCHAR, VARCHAR, VARCHAR) CASCADE;
-DROP PROCEDURE IF EXISTS delete_supplier(INTEGER) CASCADE;
-
--- Создание процедуры для добавления нового товара
+-- Процедура для добавления нового товара
 CREATE OR REPLACE PROCEDURE add_new_product(
     p_name VARCHAR,
     p_description TEXT,
@@ -248,22 +222,19 @@ AS $$
 DECLARE
     v_product_id INTEGER;
 BEGIN
-    -- Вставка нового  товара
     INSERT INTO products (name, description, price, category_id)
     VALUES (p_name, p_description, p_price, p_category_id)
     RETURNING product_id INTO v_product_id;
 
-    -- Инициализация склада
     INSERT INTO inventory (product_id, quantity, incoming_this_month, outgoing_this_month)
     VALUES (v_product_id, p_initial_quantity, p_initial_quantity, 0);
 
-    -- Запись транзакции прихода
     INSERT INTO transactions (product_id, transaction_type, quantity, supplier_id)
     VALUES (v_product_id, 'Приход', p_initial_quantity, p_supplier_id);
 END;
 $$;
 
--- Создание процедуры для записи транзакции
+-- Процедура для записи транзакции
 CREATE OR REPLACE PROCEDURE record_transaction(
     p_product_id INTEGER,
     p_transaction_type VARCHAR,
@@ -273,44 +244,38 @@ CREATE OR REPLACE PROCEDURE record_transaction(
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Вставка новой транзакции
     INSERT INTO transactions (product_id, transaction_type, quantity, supplier_id)
     VALUES (p_product_id, p_transaction_type, p_quantity, p_supplier_id);
 END;
 $$;
 
--- Создание процедуры для удаления товара
+-- Процедура для удаления товара
 CREATE OR REPLACE PROCEDURE delete_product(p_product_id INTEGER)
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Удаляем транзакции, связанные с товаром
     DELETE FROM transactions WHERE product_id = p_product_id;
 
-    -- Удаляем запись из инвентаря
     DELETE FROM inventory WHERE product_id = p_product_id;
 
-    -- Удаляем сам товар
     DELETE FROM products WHERE product_id = p_product_id;
 END;
 $$;
 
--- Создание процедуры для удаления категории
+-- Процедура для удаления категории
 CREATE OR REPLACE PROCEDURE delete_category(p_category_id INTEGER)
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Проверяем, существуют ли продукты в этой категории
     IF EXISTS (SELECT 1 FROM products WHERE category_id = p_category_id) THEN
-        RAISE EXCEPTION 'Невозможно удалить категорию, так как существуют продукты, принадлежащие ей.';
+        RAISE EXCEPTION 'Невозможно удалить категорию, так как существуют товары, принадлежащие ей.';
     END IF;
 
-    -- Удаляем категорию
     DELETE FROM product_categories WHERE category_id = p_category_id;
 END;
 $$;
 
--- Создание процедуры для добавления новой категории
+-- Процедура для добавления новой категории
 CREATE OR REPLACE PROCEDURE add_category_proc(p_category_name VARCHAR, p_description TEXT)
 LANGUAGE plpgsql
 AS $$
@@ -320,7 +285,7 @@ BEGIN
 END;
 $$;
 
--- Создание процедуры для добавления нового поставщика
+-- Процедура для добавления нового поставщика
 CREATE OR REPLACE PROCEDURE add_supplier_proc(p_supplier_name VARCHAR, p_contact_info VARCHAR, p_address VARCHAR)
 LANGUAGE plpgsql
 AS $$
@@ -330,36 +295,31 @@ BEGIN
 END;
 $$;
 
--- Создание процедуры для удаления поставщика
+-- Процедура для удаления поставщика
 CREATE OR REPLACE PROCEDURE delete_supplier(p_supplier_id INTEGER)
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Проверяем, существуют ли транзакции с этим поставщиком
     IF EXISTS (SELECT 1 FROM transactions WHERE supplier_id = p_supplier_id) THEN
         RAISE EXCEPTION 'Невозможно удалить поставщика, так как существуют транзакции, связанные с ним.';
     END IF;
-
-    -- Удаляем поставщика
     DELETE FROM suppliers WHERE supplier_id = p_supplier_id;
 END;
 $$;
 
 -- 6. Создание триггеров
 
--- Создание триггера для обновления склада после вставки транзакции
+-- Триггер для обновления склада после вставки транзакции
 CREATE TRIGGER trg_update_inventory
 AFTER INSERT ON transactions
 FOR EACH ROW
 EXECUTE FUNCTION update_inventory_on_transaction();
 
--- Создание триггера для проверки склада перед вставкой транзакции расхода
+-- Триггер для проверки склада перед вставкой транзакции расхода
 CREATE TRIGGER trg_check_inventory
 BEFORE INSERT ON transactions
 FOR EACH ROW
 EXECUTE FUNCTION check_inventory_before_withdrawal();
-
--- Завершение транзакции
 
 COMMIT;
 
