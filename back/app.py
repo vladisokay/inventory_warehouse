@@ -82,7 +82,6 @@ def create_app():
     @jwt_required()
     def get_inventory():
         try:
-            # Используем представление view_product_inventory для получения информации об инвентаре
             inventory_items = db.session.execute(
                 text("""
                     SELECT 
