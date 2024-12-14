@@ -1,6 +1,4 @@
-import os
-import subprocess
-from datetime import datetime
+import logging
 
 from flask import Flask, jsonify, request
 from flask_jwt_extended import JWTManager, jwt_required
@@ -9,6 +7,10 @@ from sqlalchemy import text
 from back.auth import auth_bp
 from back.db import db, migrate
 from back.utils import role_required
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def create_app():
@@ -25,26 +27,6 @@ def create_app():
         # Создаем все таблицы
         db.create_all()
 
-        # Создаем роли по умолчанию, если их нет
-        default_roles = [
-            {'role_id': 1, 'role_name': 'Администратор', 'permissions': 'all'},
-            {'role_id': 2, 'role_name': 'Работник', 'permissions': 'edit'},
-            {'role_id': 3, 'role_name': 'Пользователь', 'permissions': 'view'}
-        ]
-
-        for role_data in default_roles:
-            existing_role = db.session.execute(
-                text("SELECT * FROM roles WHERE role_id = :role_id"), {'role_id': role_data['role_id']}
-            ).fetchall()
-
-            if not existing_role:
-                db.session.execute(
-                    text(
-                        "INSERT INTO roles (role_id, role_name, permissions) VALUES (:role_id, :role_name, :permissions)"),
-                    role_data
-                )
-
-        db.session.commit()
 
     app.register_blueprint(auth_bp, url_prefix='/auth')
 
@@ -68,6 +50,7 @@ def create_app():
 
             return jsonify(category_list), 200
         except Exception as e:
+            logger.error(f"Ошибка при получении категорий: {e}")
             return jsonify({"message": "Ошибка на сервере"}), 500
 
     @app.route('/suppliers', methods=['GET'])
@@ -92,35 +75,35 @@ def create_app():
             return jsonify(supplier_list), 200
 
         except Exception as e:
+            logger.error(f"Ошибка при получении поставщиков: {e}")
             return jsonify({"message": f"Ошибка при получении поставщиков: {str(e)}"}), 500
 
     @app.route('/inventory', methods=['GET'])
     @jwt_required()
     def get_inventory():
         try:
-            # Выполняем основной запрос для инвентаря
+            # Используем представление view_product_inventory для получения информации об инвентаре
             inventory_items = db.session.execute(
                 text("""
-                    SELECT i.product_id, p.name, p.description, p.price, i.quantity, i.last_updated,
-                           i.incoming_this_month, i.outgoing_this_month, c.category_name, s.supplier_name
-                    FROM inventory i
-                    JOIN products p ON i.product_id = p.product_id
-                    LEFT JOIN product_categories c ON p.category_id = c.category_id
-                    LEFT JOIN transactions t ON t.product_id = p.product_id
-                    LEFT JOIN suppliers s ON t.supplier_id = s.supplier_id
-                    WHERE t.transaction_date = (
-                        SELECT MAX(transaction_date)
-                        FROM transactions
-                        WHERE product_id = p.product_id
-                    )
+                    SELECT 
+                        product_id,
+                        product_name AS name,
+                        category_name,
+                        description,
+                        price,
+                        quantity,
+                        last_updated,
+                        incoming_this_month,
+                        outgoing_this_month,
+                        supplier_name
+                    FROM view_product_inventory
                 """)
             ).mappings().fetchall()
 
             result = []
 
             for item in inventory_items:
-                last_updated = item['last_updated'].strftime('%Y-%m-%d %H:%M:%S') if item[
-                    'last_updated'] else "Не указана"
+                last_updated = item['last_updated'].strftime('%Y-%m-%d %H:%M:%S') if item['last_updated'] else "Не указана"
 
                 result.append({
                     'product_id': item['product_id'],
@@ -137,8 +120,8 @@ def create_app():
 
             return jsonify(result), 200
         except Exception as e:
-            print(f"Error on server: {e}")
-            return jsonify({"message": "Server error"}), 500
+            logger.error(f"Ошибка при получении данных склада: {e}")
+            return jsonify({"message": "Ошибка на сервере"}), 500
 
     @app.route('/inventory', methods=['POST'])
     @jwt_required()
@@ -152,8 +135,6 @@ def create_app():
             quantity = int(data['quantity'])
             category_id = int(data['category_id'])
             supplier_id = int(data['supplier_id'])
-
-            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
             # Проверяем существование категории и поставщика
             category = db.session.execute(
@@ -182,109 +163,37 @@ def create_app():
             if existing_product:
                 product_id = existing_product[0]  # Получаем ID существующего товара
 
-                # Проверяем наличие товара в inventory
-                existing_inventory = db.session.execute(
+                db.session.execute(
                     text("""
-                        SELECT * FROM inventory WHERE product_id = :product_id
+                        CALL record_transaction(:product_id, 'Приход', :quantity, :supplier_id)
                     """),
-                    {'product_id': product_id}
-                ).fetchall()
-
-                if existing_inventory:
-                    # Если товар уже есть в инвентаре, обновляем его количество
-                    db.session.execute(
-                        text("""
-                                                UPDATE inventory
-                                                SET quantity = quantity + :quantity,
-                                                    incoming_this_month = incoming_this_month + :quantity,
-                                                    last_updated = :current_time
-                                                WHERE product_id = :product_id
-                                            """),
-                        {'product_id': product_id, 'quantity': quantity, 'current_time': current_time}
-                    )
-                else:
-                    # Если товара нет в inventory, добавляем его
-                    db.session.execute(
-                        text("""
-                                               INSERT INTO inventory (product_id, quantity, incoming_this_month, last_updated)
-                                               VALUES (:product_id, :quantity, :quantity, :current_time)
-                                           """),
-                        {'product_id': product_id, 'quantity': quantity, 'current_time': current_time}
-                    )
-
+                    {
+                        'product_id': product_id,
+                        'quantity': quantity,
+                        'supplier_id': supplier_id
+                    }
+                )
             else:
-                # Если товара нет, добавляем его в таблицу products
                 db.session.execute(
                     text("""
-                        INSERT INTO products (name, description, price, category_id)
-                        VALUES (:name, :description, :price, :category_id)
+                        CALL add_new_product(:name, :description, :price, :category_id, :quantity, :supplier_id)
                     """),
-                    {'name': name, 'description': description, 'price': price, 'category_id': category_id}
+                    {
+                        'name': name,
+                        'description': description,
+                        'price': price,
+                        'category_id': category_id,
+                        'quantity': quantity,
+                        'supplier_id': supplier_id
+                    }
                 )
-
-                # Получаем ID добавленного товара
-                product_id_result = db.session.execute(
-                    text("""
-                        SELECT product_id FROM products WHERE name = :name AND price = :price
-                    """),
-                    {'name': name, 'price': price}
-                ).fetchone()
-
-                if product_id_result:
-                    product_id = product_id_result[0]
-                else:
-                    return jsonify({"message": "Товар не найден после добавления"}), 404
-
-                db.session.execute(
-                    text("""
-                                   INSERT INTO inventory (product_id, quantity, incoming_this_month, last_updated)
-                                   VALUES (:product_id, :quantity, :quantity, :current_time)
-                               """),
-                    {'product_id': product_id, 'quantity': quantity, 'current_time': current_time}
-                )
-
-            # Добавляем запись в таблицу transactions (приход)
-            db.session.execute(
-                text("""
-                    INSERT INTO transactions (product_id, transaction_type, quantity, transaction_date, supplier_id)
-                    VALUES (:product_id, 'Приход', :quantity, NOW(), :supplier_id)
-                """),
-                {'product_id': product_id, 'quantity': quantity, 'supplier_id': supplier_id}
-            )
 
             db.session.commit()
 
-            return jsonify({"message": "Товар успешно добавлен в инвентарь"}), 201
+            return jsonify({"message": "Товар успешно добавлен на склад"}), 201
         except Exception as e:
-            return jsonify({"message": "Ошибка на сервере"}), 500
-
-    @app.route('/inventory/<int:product_id>', methods=['DELETE'])
-    @jwt_required()
-    @role_required([1])  # Только Администратор
-    def delete_product(product_id):
-        try:
-            # Удаляем записи из transactions
-            db.session.execute(
-                text("DELETE FROM transactions WHERE product_id = :product_id"),
-                {'product_id': product_id}
-            )
-
-            # Удаляем товар из таблицы inventory
-            db.session.execute(
-                text("DELETE FROM inventory WHERE product_id = :product_id"),
-                {'product_id': product_id}
-            )
-
-            # Удаляем товар из таблицы products
-            db.session.execute(
-                text("DELETE FROM products WHERE product_id = :product_id"),
-                {'product_id': product_id}
-            )
-
-            db.session.commit()
-
-            return jsonify({"message": "Товар успешно удален"}), 200
-        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Ошибка при добавлении товара: {e}")
             return jsonify({"message": "Ошибка на сервере"}), 500
 
     @app.route('/inventory/<int:product_id>/quantity', methods=['PATCH'])
@@ -295,81 +204,72 @@ def create_app():
             data = request.get_json()
             action = data.get('action')
             amount = int(data.get('amount', 0))
-
-            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            supplier_id = data.get('supplier_id')
 
             if action not in ['increase', 'decrease']:
                 return jsonify({"message": "Некорректное действие. Используйте 'increase' или 'decrease'."}), 400
             if amount <= 0:
                 return jsonify({"message": "Количество должно быть положительным числом."}), 400
 
-            # Получаем текущую запись из inventory
-            inventory_item = db.session.execute(
-                text("SELECT * FROM inventory WHERE product_id = :product_id"),
-                {'product_id': product_id}
-            ).mappings().fetchone()
+            # Определяем тип транзакции
+            transaction_type = 'Приход' if action == 'increase' else 'Расход'
 
-            if not inventory_item:
-                return jsonify({"message": "Товар не найден"}), 404
-
-            current_quantity = inventory_item['quantity']
-            incoming_this_month = inventory_item['incoming_this_month']
-            outgoing_this_month = inventory_item['outgoing_this_month']
-
-            # Логика для увеличения или уменьшения количества
+            # Валидация supplier_id
             if action == 'increase':
-                # Увеличиваем количество
-                new_quantity = current_quantity + amount
-                new_incoming = incoming_this_month + amount  # Увеличиваем приход за месяц
-                db.session.execute(
-                    text("""
-                        UPDATE inventory 
-                        SET quantity = :new_quantity, incoming_this_month = :new_incoming, last_updated = :current_time
-                        WHERE product_id = :product_id
-                    """),
-                    {'new_quantity': new_quantity, 'new_incoming': new_incoming, 'current_time': current_time, 'product_id': product_id, }
-                )
-                transaction_type = 'Приход'
+                if not supplier_id:
+                    return jsonify({"message": "Для прихода необходим идентификатор поставщика."}), 400
             elif action == 'decrease':
-                # Уменьшаем количество
-                if amount > current_quantity:
-                    return jsonify({"message": "Недостаточно товара для уменьшения"}), 400
-                new_quantity = current_quantity - amount
-                new_outgoing = outgoing_this_month + amount  # Увеличиваем отгрузку за месяц
-                db.session.execute(
-                    text("""
-                        UPDATE inventory 
-                        SET quantity = :new_quantity, outgoing_this_month = :new_outgoing, last_updated = :current_time
-                        WHERE product_id = :product_id
-                    """),
-                    {'new_quantity': new_quantity, 'new_outgoing': new_outgoing, 'current_time': current_time, 'product_id': product_id}
-                )
-                transaction_type = 'Расход'
+                pass
 
-            # Добавляем запись в таблицу transactions
             db.session.execute(
                 text("""
-                    INSERT INTO transactions (product_id, transaction_type, quantity, transaction_date)
-                    VALUES (:product_id, :transaction_type, :quantity, NOW())
+                    CALL record_transaction(:product_id, :transaction_type, :quantity, :supplier_id)
                 """),
-                {'product_id': product_id, 'transaction_type': transaction_type, 'quantity': amount}
+                {
+                    'product_id': product_id,
+                    'transaction_type': transaction_type,
+                    'quantity': amount,
+                    'supplier_id': supplier_id
+                }
             )
 
             db.session.commit()
 
             return jsonify({"message": "Количество успешно обновлено"}), 200
         except Exception as e:
+            db.session.rollback()
+            logger.error(f"Ошибка при обновлении количества товара (ID: {product_id}): {e}")
+            return jsonify({"message": "Ошибка на сервере"}), 500
+
+
+    @app.route('/inventory/<int:product_id>', methods=['DELETE'])
+    @jwt_required()
+    @role_required([1])  # Только Администратор
+    def delete_product_endpoint(product_id):
+        try:
+            db.session.execute(
+                text("""
+                    CALL delete_product(:product_id)
+                """),
+                {'product_id': product_id}
+            )
+            db.session.commit()
+            return jsonify({"message": "Товар успешно удален"}), 200
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Ошибка при удалении товара (ID: {product_id}): {e}")
             return jsonify({"message": "Ошибка на сервере"}), 500
 
     @app.route('/categories', methods=['POST'])
     @jwt_required()
     @role_required([1, 2])  # Администратор или работник
-    def add_category():
+    def add_category_endpoint():
         try:
             data = request.get_json()
             category_name = data['category_name']
             description = data.get('description', '')
 
+            # Проверяем, существует ли уже категория с таким названием
             existing_category = db.session.execute(
                 text("SELECT * FROM product_categories WHERE category_name = :category_name"),
                 {'category_name': category_name}
@@ -380,8 +280,7 @@ def create_app():
 
             db.session.execute(
                 text("""
-                    INSERT INTO product_categories (category_name, description)
-                    VALUES (:category_name, :description)
+                    CALL add_category_proc(:category_name, :description)
                 """),
                 {'category_name': category_name, 'description': description}
             )
@@ -389,41 +288,41 @@ def create_app():
 
             return jsonify({"message": "Категория успешно добавлена"}), 201
         except Exception as e:
+            db.session.rollback()
+            logger.error(f"Ошибка при добавлении категории '{category_name}': {e}")
             return jsonify({"message": "Ошибка на сервере"}), 500
 
     @app.route('/categories/<int:category_id>', methods=['DELETE'])
     @jwt_required()
     @role_required([1])  # Только Администратор
-    def delete_category(category_id):
+    def delete_category_endpoint(category_id):
         try:
-            category = db.session.execute(
-                text("SELECT * FROM product_categories WHERE category_id = :category_id"),
-                {'category_id': category_id}
-            ).fetchone()
-
-            if not category:
-                return jsonify({"message": "Категория не найдена"}), 404
-
             db.session.execute(
-                text("DELETE FROM product_categories WHERE category_id = :category_id"),
+                text("""
+                    CALL delete_category(:category_id)
+                """),
                 {'category_id': category_id}
             )
             db.session.commit()
-
             return jsonify({"message": "Категория успешно удалена"}), 200
         except Exception as e:
+            db.session.rollback()
+            logger.error(f"Ошибка при удалении категории (ID: {category_id}): {e}")
+            if 'невозможно удалить категорию' in str(e).lower():
+                return jsonify({"message": str(e)}), 400
             return jsonify({"message": "Ошибка на сервере"}), 500
 
     @app.route('/suppliers', methods=['POST'])
     @jwt_required()
     @role_required([1, 2])  # Администратор или работник
-    def add_supplier():
+    def add_supplier_endpoint():
         try:
             data = request.get_json()
             supplier_name = data['supplier_name']
             contact_info = data.get('contact_info', '')
             address = data.get('address', '')
 
+            # Проверяем, существует ли уже поставщик с таким названием
             existing_supplier = db.session.execute(
                 text("SELECT * FROM suppliers WHERE supplier_name = :supplier_name"),
                 {'supplier_name': supplier_name}
@@ -434,8 +333,7 @@ def create_app():
 
             db.session.execute(
                 text("""
-                    INSERT INTO suppliers (supplier_name, contact_info, address)
-                    VALUES (:supplier_name, :contact_info, :address)
+                    CALL add_supplier_proc(:supplier_name, :contact_info, :address)
                 """),
                 {'supplier_name': supplier_name, 'contact_info': contact_info, 'address': address}
             )
@@ -443,29 +341,67 @@ def create_app():
 
             return jsonify({"message": "Поставщик успешно добавлен"}), 201
         except Exception as e:
+            db.session.rollback()
+            logger.error(f"Ошибка при добавлении поставщика '{supplier_name}': {e}")
             return jsonify({"message": "Ошибка на сервере"}), 500
 
     @app.route('/suppliers/<int:supplier_id>', methods=['DELETE'])
     @jwt_required()
     @role_required([1])  # Только Администратор
-    def delete_supplier(supplier_id):
+    def delete_supplier_endpoint(supplier_id):
         try:
-            supplier = db.session.execute(
-                text("SELECT * FROM suppliers WHERE supplier_id = :supplier_id"),
-                {'supplier_id': supplier_id}
-            ).fetchone()
-
-            if not supplier:
-                return jsonify({"message": "Поставщик не найден"}), 404
-
             db.session.execute(
-                text("DELETE FROM suppliers WHERE supplier_id = :supplier_id"),
+                text("""
+                    CALL delete_supplier(:supplier_id)
+                """),
                 {'supplier_id': supplier_id}
             )
             db.session.commit()
-
             return jsonify({"message": "Поставщик успешно удален"}), 200
         except Exception as e:
+            db.session.rollback()
+            logger.error(f"Ошибка при удалении поставщика (ID: {supplier_id}): {e}")
+            if 'невозможно удалить поставщика' in str(e).lower():
+                return jsonify({"message": str(e)}), 400
+            return jsonify({"message": "Ошибка на сервере"}), 500
+
+
+    @app.route('/transactions', methods=['GET'])
+    @jwt_required()
+    @role_required([1, 2])  # Администратор или работник
+    def get_transactions():
+        try:
+            transactions = db.session.execute(
+                text("""
+                    SELECT 
+                        transaction_id,
+                        transaction_date,
+                        transaction_type,
+                        quantity,
+                        product_name,
+                        supplier_name,
+                        contact_info,
+                        address
+                    FROM view_transaction_details
+                """)
+            ).mappings().fetchall()
+
+            transaction_list = []
+            for txn in transactions:
+                transaction_list.append({
+                    'transaction_id': txn['transaction_id'],
+                    'transaction_date': txn['transaction_date'].strftime('%Y-%m-%d %H:%M:%S') if txn['transaction_date'] else "Не указана",
+                    'transaction_type': txn['transaction_type'],
+                    'quantity': txn['quantity'],
+                    'product_name': txn['product_name'],
+                    'supplier_name': txn['supplier_name'] if txn['supplier_name'] else "Не указан",
+                    'contact_info': txn['contact_info'] if txn['contact_info'] else "Не указано",
+                    'address': txn['address'] if txn['address'] else "Не указано"
+                })
+
+            return jsonify(transaction_list), 200
+        except Exception as e:
+            logger.error(f"Ошибка при получении транзакций: {e}")
             return jsonify({"message": "Ошибка на сервере"}), 500
 
     return app
