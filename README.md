@@ -75,10 +75,10 @@
 5. **Запустите сервер:**
 
    ```bash
-    python .back/app.py
+    python back/app.py
    ```
    
 6. **Запустите клиентское приложение**
    ```python
-   python .client/main.py 
+   python client/main.py 
    ```
